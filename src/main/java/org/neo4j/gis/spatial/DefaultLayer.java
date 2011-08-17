@@ -130,16 +130,18 @@ public class DefaultLayer implements Constants, Layer, SpatialDataset {
     private static class GuessGeometryTypeSearch extends AbstractSearch {
 
         Integer firstFoundType;
-            
-        public boolean needsToVisit(Envelope indexNodeEnvelope) {
-            return firstFoundType == null;
-        }
 
         public void onIndexReference(Node geomNode) {
             if (firstFoundType == null) {
                 firstFoundType = (Integer) geomNode.getProperty(PROP_TYPE);
             }
         }
+
+		@Override
+		public boolean needsToVisit(double[] indexNodeEnvelope) {
+			// TODO Auto-generated method stub
+			return firstFoundType == null;
+		}
     }
 
     public String[] getExtraPropertyNames() {

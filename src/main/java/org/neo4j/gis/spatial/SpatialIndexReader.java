@@ -32,7 +32,7 @@ public interface SpatialIndexReader {
 
 	boolean isEmpty();	
 	
-	Envelope getLayerBoundingBox();
+	double[] getLayerBoundingBox();
 
 	int count();
 

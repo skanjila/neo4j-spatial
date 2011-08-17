@@ -85,7 +85,7 @@ public interface GeometryEncoder {
      * @param container
      * @return
      */
-    Envelope decodeEnvelope(PropertyContainer container);
+    double[] decodeEnvelope(PropertyContainer container);
 
 	/**
 	 * Each geometry might have a set of associated attributes, or properties.

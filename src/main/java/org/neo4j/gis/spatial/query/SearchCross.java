@@ -41,4 +41,10 @@ public class SearchCross extends AbstractSearchIntersection {
 		if (geometry.crosses(other)) add(geomNode, geometry);
 	}
 
+	@Override
+	public boolean needsToVisit(double[] indexNodeEnvelope) {
+		// TODO Auto-generated method stub
+		return true;
+	}
+
 }

@@ -49,7 +49,7 @@ public abstract class AbstractGeometryEncoder implements GeometryEncoder, Consta
 		encodeGeometryShape(geometry, container);
 	}
 
-	public Envelope decodeEnvelope(PropertyContainer container) {
+	public double[] decodeEnvelope(PropertyContainer container) {
 	    double[] bbox = new double[]{0,0,0,0,};
 	    Object bboxProp = container.getProperty(PROP_BBOX);
 		if (bboxProp instanceof Double[]) {
@@ -58,7 +58,7 @@ public abstract class AbstractGeometryEncoder implements GeometryEncoder, Consta
 	        bbox = (double[])bboxProp;
 	    }
 		// Envelope parameters: xmin, xmax, ymin, ymax
-		return new Envelope(bbox[0], bbox[2], bbox[1], bbox[3]);
+		return bbox;
 	}
 
 	// Protected methods

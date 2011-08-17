@@ -75,7 +75,7 @@ public abstract class AbstractSearch implements Search {
 		results.add(result);
 	}
 	
-	protected Envelope getEnvelope(Node geomNode) {
+	protected double[] getEnvelope(Node geomNode) {
 		return layer.getGeometryEncoder().decodeEnvelope(geomNode);	
 	}
 

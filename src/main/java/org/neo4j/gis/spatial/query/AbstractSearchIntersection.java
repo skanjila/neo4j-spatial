@@ -40,7 +40,7 @@ public abstract class AbstractSearchIntersection extends AbstractSearch {
 	}
 	
 	public final void onIndexReference(Node geomNode) {	
-		Envelope geomEnvelope = getEnvelope(geomNode);
+		double[] geomEnvelope = getEnvelope(geomNode);
 		if (geomEnvelope.intersects(other.getEnvelopeInternal())) {
 			onEnvelopeIntersection(geomNode, geomEnvelope);
 		}

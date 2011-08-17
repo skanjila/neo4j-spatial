@@ -104,7 +104,7 @@ public class DynamicLayer extends EditableLayerImpl {
 			return index.get(geomNodeIds);
 		}
 
-		public Envelope getLayerBoundingBox() {
+		public double[] getLayerBoundingBox() {
 			return index.getLayerBoundingBox();
 		}
 
@@ -157,6 +157,10 @@ public class DynamicLayer extends EditableLayerImpl {
                 }
             }
         }
+        
+        private boolean queryIndexNode(Envelope indexNodeEnvelope) {
+            return true;
+        }
 
         private class FilteredSearch implements Search {
             private Search delegate;
@@ -172,7 +176,7 @@ public class DynamicLayer extends EditableLayerImpl {
                 delegate.setLayer(layer);
             }
 
-            public boolean needsToVisit(Envelope indexNodeEnvelope) {
+            public boolean needsToVisit(double[] indexNodeEnvelope) {
                 return delegate.needsToVisit(indexNodeEnvelope);
             }
 
@@ -181,10 +185,6 @@ public class DynamicLayer extends EditableLayerImpl {
                     delegate.onIndexReference(geomNode);
                 }
             }
-        }
-
-        private boolean queryIndexNode(Envelope indexNodeEnvelope) {
-            return true;
         }
 
         private boolean queryLeafNode(Node indexNode) {
@@ -329,7 +329,8 @@ public class DynamicLayer extends EditableLayerImpl {
 					search.setLayer(layer);
 				}
 
-				public boolean needsToVisit(Envelope indexNodeEnvelope) {
+				@Override
+				public boolean needsToVisit(double[] indexNodeEnvelope) {
 					return search.needsToVisit(indexNodeEnvelope);
 				}
 
