@@ -37,19 +37,19 @@ public abstract class AbstractGeometryEncoder implements GeometryEncoder, Consta
 		this.layer = layer;
 	}
 
-	public void encodeEnvelope(Envelope mbb, PropertyContainer container) {
-		container.setProperty(PROP_BBOX, new double[] { mbb.getMinX(), mbb.getMinY(), mbb.getMaxX(), mbb.getMaxY() });
+	public void encodeBoundingBox(double[] mbb, PropertyContainer container) {
+		container.setProperty(PROP_BBOX, new double[] { mbb[0], mbb[1], mbb[2], mbb[3] });
 	}
 
 	public void encodeGeometry(Geometry geometry, PropertyContainer container) {
 		container.setProperty(PROP_TYPE, encodeGeometryType(geometry.getGeometryType()));
 
-		encodeEnvelope(geometry.getEnvelopeInternal(), container);
+		encodeBoundingBox(geometry.getEnvelopeInternal(), container);
 
 		encodeGeometryShape(geometry, container);
 	}
 
-	public double[] decodeEnvelope(PropertyContainer container) {
+	public double[] decodeBoundingBox(PropertyContainer container) {
 	    double[] bbox = new double[]{0,0,0,0,};
 	    Object bboxProp = container.getProperty(PROP_BBOX);
 		if (bboxProp instanceof Double[]) {

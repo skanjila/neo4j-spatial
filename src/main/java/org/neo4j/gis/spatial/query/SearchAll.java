@@ -30,12 +30,14 @@ import com.vividsolutions.jts.geom.Envelope;
  */
 public class SearchAll extends AbstractSearch {
 
-	public boolean needsToVisit(Envelope indexNodeEnvelope) {
-		return true;
-	}
-
 	public void onIndexReference(Node geomNode) {
 		add(geomNode);
+	}
+
+	@Override
+	public boolean needsToVisit(double[] indexNodeBoundingBox) {
+		// TODO Auto-generated method stub
+		return true;
 	}
 
 }
