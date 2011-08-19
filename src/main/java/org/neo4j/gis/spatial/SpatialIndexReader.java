@@ -31,8 +31,6 @@ import com.vividsolutions.jts.geom.Envelope;
 public interface SpatialIndexReader {
 
 	boolean isEmpty();	
-	
-	double[] getLayerBoundingBox();
 
 	int count();
 

@@ -63,7 +63,7 @@ public class SearchIntersectWindow extends AbstractSearch {
 		}
 	}	
 
-	private double[] window;
+	private Envelope window;
 	private Geometry windowGeom;
 	@Override
 	public boolean needsToVisit(double[] indexNodeBoundingBox) {

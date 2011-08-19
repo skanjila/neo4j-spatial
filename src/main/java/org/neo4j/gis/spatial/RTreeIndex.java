@@ -23,13 +23,11 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
-
-import org.apache.commons.lang.ArrayUtils;
+import org.neo4j.gis.spatial.generic.GenericBoundingBox;
 import org.neo4j.gis.spatial.query.SearchAll;
 import org.neo4j.graphdb.Direction;
 import org.neo4j.graphdb.GraphDatabaseService;
 import org.neo4j.graphdb.Node;
-import org.neo4j.graphdb.PropertyContainer;
 import org.neo4j.graphdb.Relationship;
 import org.neo4j.graphdb.RelationshipType;
 import org.neo4j.graphdb.ReturnableEvaluator;
@@ -48,8 +46,9 @@ import org.neo4j.graphdb.Traverser.Order;
  * 
  * @author Davide Savazzi
  */
-public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constants {
+public class RTreeIndex implements Constants {
 
+	private Layer layer;
 	// Constructor
 	
 	public RTreeIndex(GraphDatabaseService database, Layer layer) {
@@ -61,25 +60,132 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		this.layer = layer;
 		this.maxNodeReferences = maxNodeReferences;
 		this.minNodeReferences = minNodeReferences;
-		this.boundingBox=new BoundingBox();
+		this.boundingBox=new GenericBoundingBox();
 		
 		initIndexRoot();
 		initIndexMetadata();
 	}
 	
 	
+	
+	public Node quadraticSplit(Node indexNode, RelationshipType relationshipType) {
+ 		List<Node> entries = new ArrayList<Node>();
+		
+		Iterable<Relationship> relationships = indexNode.getRelationships(relationshipType, Direction.OUTGOING);
+		for (Relationship relationship : relationships) {
+			entries.add(relationship.getEndNode());
+			relationship.delete();
+		}
+
+		// pick two seed entries such that the dead space is maximal
+		Node seed1 = null;
+		Node seed2 = null;
+		double worst = Double.NEGATIVE_INFINITY;
+		for (Node e : entries) {
+			double[] eEnvelope = boundingBox.getLeafNodeBoundingBox(e);
+			for (Node e1 : entries) {
+				double[] e1Envelope = boundingBox.getLeafNodeBoundingBox(e1);
+				double deadSpace = boundingBox.getArea(boundingBox.createBoundingBox(eEnvelope, e1Envelope)) - boundingBox.getArea(eEnvelope) - boundingBox.getArea(e1Envelope);
+				if (deadSpace > worst) {
+					worst = deadSpace;
+					seed1 = e;
+					seed2 = e1;
+				}
+			}
+		}
+		
+		List<Node> group1 = new ArrayList<Node>();
+		group1.add(seed1);
+		double[] group1envelope = boundingBox.getLeafNodeBoundingBox(seed1);
+		
+		List<Node> group2 = new ArrayList<Node>();
+		group2.add(seed2);
+		double[] group2envelope = boundingBox.getLeafNodeBoundingBox(seed2);
+		
+		entries.remove(seed1);
+		entries.remove(seed2);
+		while (entries.size() > 0) {
+			// compute the cost of inserting each entry
+			List<Node> bestGroup = null;
+			double[] bestGroupEnvelope = null;
+			Node bestEntry = null;
+			double expansionMin = Double.POSITIVE_INFINITY;
+			for (Node e : entries) {
+				double[] nodeEnvelope = boundingBox.getLeafNodeBoundingBox(e);
+				double expansion1 = boundingBox.getArea(boundingBox.createBoundingBox(nodeEnvelope, group1envelope)) - boundingBox.getArea(group1envelope);
+				double expansion2 = boundingBox.getArea(boundingBox.createBoundingBox(nodeEnvelope, group2envelope)) - boundingBox.getArea(group2envelope);
+						
+				if (expansion1 < expansion2 && expansion1 < expansionMin) {
+					bestGroup = group1;
+					bestGroupEnvelope = group1envelope;
+					bestEntry = e;
+					expansionMin = expansion1;
+				} else if (expansion2 < expansion1 && expansion2 < expansionMin) {
+					bestGroup = group2;
+					bestGroupEnvelope = group2envelope;					
+					bestEntry = e;
+					expansionMin = expansion2;					
+				} else if (expansion1 == expansion2 && expansion1 < expansionMin) {
+					// in case of equality choose the group with the smallest area
+					if (boundingBox.getArea(group1envelope) < boundingBox.getArea(group2envelope)) {
+						bestGroup = group1;
+						bestGroupEnvelope = group1envelope; 
+					} else {
+						bestGroup = group2;
+						bestGroupEnvelope = group2envelope; 
+					}
+					bestEntry = e;
+					expansionMin = expansion1;					
+				}
+			}
+			
+			// insert the best candidate entry in the best group
+			bestGroup.add(bestEntry);
+			boundingBox.expandToInclude(bestGroupEnvelope,boundingBox.getLeafNodeBoundingBox(bestEntry));
+
+			entries.remove(bestEntry);
+			
+			// each group must contain at least minNodeReferences entries.
+			// if the group size added to the number of remaining entries is equal to minNodeReferences
+			// just add them to the group
+			
+			if (group1.size() + entries.size() == minNodeReferences) {
+				group1.addAll(entries);
+				entries.clear();
+			}
+			
+			if (group2.size() + entries.size() == minNodeReferences) {
+				group2.addAll(entries);
+				entries.clear();
+			}
+		}
+		
+		// reset bounding box and add new children
+		indexNode.removeProperty(PROP_BBOX);
+		for (Node node : group1) {
+			boundingBox.addChild(indexNode, relationshipType, node);
+		}
+
+		// create new node from split
+		Node newIndexNode = database.createNode();
+		for (Node node: group2) {
+			boundingBox.addChild(newIndexNode, relationshipType, node);
+		}
+				
+		return newIndexNode;
+	}
 	// Public methods
 	
 	public void add(Node geomNode) {
 		// initialize the search with root
-		Node parent = getIndexRoot();
+		Node parent = boundingBox.getIndexRoot();
 		
 		// choose a path down to a leaf
 		while (!nodeIsLeaf(parent)) {
 			parent = chooseSubTree(parent, geomNode);
 		}
 		
-		if (countChildren(parent, SpatialRelationshipTypes.RTREE_REFERENCE) == maxNodeReferences) {
+		if (boundingBox.countChildren(parent, SpatialRelationshipTypes.RTREE_REFERENCE) == maxNodeReferences) {
 			insertInLeaf(parent, geomNode);
 			splitAndAdjustPathBoundingBox(parent);
 		} else {
@@ -103,12 +209,12 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		if (deleteGeomNode) deleteNode(geomNode);
 		
 		// reorganize the tree if needed
-		if (getIndexNodeParent(indexNode) != null && countChildren(indexNode, SpatialRelationshipTypes.RTREE_REFERENCE) < minNodeReferences) {
+		if (boundingBox.getIndexNodeParent(indexNode) != null && boundingBox.countChildren(indexNode, SpatialRelationshipTypes.RTREE_REFERENCE) < minNodeReferences) {
 			// indexNode is not the root and contain less than the minimum number of entries
 			// tree needs reorganization
 			
 			// find the parent that must be deleted (its children < minNodeReferences) nearest to the root
-			Node lastParentNodeToDelete = findIndexNodeToDeleteNearestToRoot(indexNode);
+			Node lastParentNodeToDelete = boundingBox.findIndexNodeToDeleteNearestToRoot(indexNode);
 			
 			// find all geomNodes in the subtree
 			SearchAll search = new SearchAll();
@@ -124,8 +230,8 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 			deleteRecursivelyEmptySubtree(lastParentNodeToDelete);
 
 			// adjust tree
-			boundingBox.adjustParentBoundingBox(getIndexNodeParent(lastParentNodeToDelete), SpatialRelationshipTypes.RTREE_CHILD);
-			boundingBox.adjustPathBoundingBox(getIndexNodeParent(lastParentNodeToDelete));
+			boundingBox.adjustParentBoundingBox(boundingBox.getIndexNodeParent(lastParentNodeToDelete), SpatialRelationshipTypes.RTREE_CHILD);
+			boundingBox.adjustPathBoundingBox(boundingBox.getIndexNodeParent(lastParentNodeToDelete));
 			
 			// add orphaned geomNodes
 			for (SpatialDatabaseRecord orphan : orphanedGeometryNodes) {
@@ -142,40 +248,10 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	
 	
 	
-    
-	
-	
-	/**
-	 * Adjust IndexNode bounding box according to the new child inserted
-	 * @param parent IndexNode
-	 * @param child geomNode inserted
-	 * @return is bbox changed?
-	 */
-	private boolean adjustParentBoundingBox(Node parent, double[] childBBox) {
-		if (!parent.hasProperty(PROP_BBOX)) {
-			parent.setProperty(PROP_BBOX, new double[] { childBBox[0], childBBox[1], childBBox[2], childBBox[3] });
-			return true;
-		}
-		
-		double[] parentBBox = (double[]) parent.getProperty(PROP_BBOX);
-		
-		boolean valueChanged = boundingBox.setMin(parentBBox, childBBox, 0);
-		valueChanged = boundingBox.setMin(parentBBox, childBBox, 1) || valueChanged;
-		valueChanged = boundingBox.setMax(parentBBox, childBBox, 2) || valueChanged;
-		valueChanged = boundingBox.setMax(parentBBox, childBBox, 3) || valueChanged;
-		
-		if (valueChanged) {
-			parent.setProperty(PROP_BBOX, parentBBox);
-		}
-		
-		return valueChanged;
-	}
-	
-	
-	
+
 	
 	public void removeAll(final boolean deleteGeomNodes, final Listener monitor) {
-		Node indexRoot = getIndexRoot();
+		Node indexRoot = boundingBox.getIndexRoot();
 		
 		monitor.begin(count());
 		try {
@@ -236,7 +312,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	}
 
 	public boolean isEmpty() {
-		Node indexRoot = getIndexRoot();
+		Node indexRoot = boundingBox.getIndexRoot();
 		return !indexRoot.hasProperty(PROP_BBOX);
 	}
 	
@@ -261,36 +337,22 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		saveCount();
 		
 		search.setLayer(layer);
-		visit(search, getIndexRoot());
+		visit(search, boundingBox.getIndexRoot());
 	}
 	
 	public void warmUp() {
-		visit(new WarmUpVisitor(), getIndexRoot());
+		visit(new WarmUpVisitor(), boundingBox.getIndexRoot());
 	}
 	
 	
 	// Private methods
 	
 	
-	public double [] getLeafNodeBoundingBox(Node geomNode) {
-		return decodeLeafNodeBounds(geomNode);
-	}
 	
-	private double[] decodeLeafNodeBounds(PropertyContainer container) {
-	    double[] bbox = new double[]{0,0,0,0};
-	    Object bboxProp = container.getProperty(PROP_BBOX);
-		if (bboxProp instanceof Double[]) {
-		    bbox = ArrayUtils.toPrimitive( (Double[])bboxProp);
-		} else if (bboxProp instanceof double[]) {
-	        bbox = (double[])bboxProp;
-	    }
-		// Bounding Box parameters: xmin, xmax, ymin, ymax
-		return bbox;
-	}
 	
 	
 	public void visit(SpatialIndexVisitor visitor, Node indexNode) {
-		if (!visitor.needsToVisit(getIndexNodeBoundingBox(indexNode))) return;
+		if (!visitor.needsToVisit(boundingBox.getIndexNodeBoundingBox(indexNode))) return;
 		
 		if (indexNode.hasRelationship(SpatialRelationshipTypes.RTREE_CHILD, Direction.OUTGOING)) {
 			// Node is not a leaf
@@ -309,7 +371,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	
 	private void visitInTx(SpatialIndexVisitor visitor, Long indexNodeId) {
         Node indexNode = database.getNodeById(indexNodeId);
-        if(!visitor.needsToVisit(getIndexNodeBoundingBox(indexNode))) return;
+        if(!visitor.needsToVisit(boundingBox.getIndexNodeBoundingBox(indexNode))) return;
 		
 		if (indexNode.hasRelationship(SpatialRelationshipTypes.RTREE_CHILD, Direction.OUTGOING)) {
 			// Node is not a leaf
@@ -359,7 +421,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	private void saveCount() {
 		if (totalGeometryCount == 0) {
 			RecordCounter counter = new RecordCounter();
-			visit(counter, getIndexRoot());
+			visit(counter, boundingBox.getIndexRoot());
 			totalGeometryCount = counter.getResult();
 			countSaved = false;
 		}
@@ -406,53 +468,13 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		}
 	}
 	
-	public Node getIndexRoot() {
-		return layer.getLayerNode().getSingleRelationship(SpatialRelationshipTypes.RTREE_ROOT, Direction.OUTGOING).getEndNode();
-	}
+	
 	
 	private boolean nodeIsLeaf(Node node) {
 		return !node.hasRelationship(SpatialRelationshipTypes.RTREE_CHILD, Direction.OUTGOING);
 	}
 	
-	public double[] getLayerBoundingBox() {
-		return getIndexNodeBoundingBox(getIndexRoot());
-	}
-	
-	
-	/**
-	 * The index nodes do NOT belong to the domain model, and as such need to
-	 * use the indexes internal knowledge of the index tree and node structure
-	 * for decoding the bounding box.
-	 */
-	public double[] getIndexNodeBoundingBox(Node indexNode) {
-		if(indexNode ==null) indexNode = getIndexRoot();
-		if (!indexNode.hasProperty(PROP_BBOX)) {
-			System.err.println("Layer '" + layer.getName() + "' node[" + indexNode + "] has no bounding box property '" + PROP_BBOX + "'");
-			return null;
-		}
-		return (double[])indexNode.getProperty(PROP_BBOX);
-	}
-	
-	
-	/**
-	  * Tests if the given point lies in or on the bounding box.
-	  *
-	  *@param  x  the x-coordinate of the point which this <code>Envelope</code> is
-	  *      being checked for containing
-	  *@param  y  the y-coordinate of the point which this <code>Envelope</code> is
-	  *      being checked for containing
-	  *@return    <code>true</code> if <code>(x, y)</code> lies in the interior or
-	  *      on the boundary of this <code>Envelope</code>.
-	 */
-	 public boolean coversBoundingBox(double [] curBbox,double x, double y) {
-	  	if (curBbox[1] < curBbox[0]) return false;
-	    return x >= curBbox[0] &&
-	        x <= curBbox[1] &&
-	        y >= curBbox[2] &&
-	        y <= curBbox[3];
-	 }
-	
-	
+
 	private Node chooseSubTree(Node parentIndexNode, Node geomRootNode) {
 		// children that can contain the new geometry
 		List<Node> indexNodes = new ArrayList<Node>();
@@ -463,7 +485,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 			Node indexNode = relation.getEndNode();
 			Double x = (Double)geomRootNode.getProperty("x");
 			Double y = (Double)geomRootNode.getProperty("y");
-			if (coversBoundingBox(getIndexNodeBoundingBox(indexNode),x.doubleValue(),y.doubleValue())) {
+			if (boundingBox.coversBoundingBox(boundingBox.getIndexNodeBoundingBox(indexNode),x.doubleValue(),y.doubleValue())) {
 				indexNodes.add(indexNode);
 			}
 		}
@@ -479,7 +501,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		relationships = parentIndexNode.getRelationships(SpatialRelationshipTypes.RTREE_CHILD, Direction.OUTGOING);
 		for (Relationship relation : relationships) {
 			Node indexNode = relation.getEndNode();
-			double enlargementNeeded = getAreaEnlargement(indexNode, geomRootNode);
+			double enlargementNeeded = boundingBox.getAreaEnlargement(indexNode, geomRootNode);
 
 			if (enlargementNeeded < minimumEnlargement) {
 				indexNodes.clear();
@@ -500,28 +522,10 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		}
 	}
 
-	private double getAreaEnlargement(Node indexNode, Node geomRootNode) {
-    	double[] before = getIndexNodeBoundingBox(indexNode);
-    	
-    	double[] after = getIndexNodeBoundingBox(indexNode);
-    	//after.expandToInclude(before);
-    	boundingBox.expandToInclude(after,before);
-    	
-    	return getArea(after) - getArea(before);
-    }
 	
 	
 	
-	public double getArea(double[] bbox) {
-		double width=Math.abs(bbox[1]-bbox[0]);
-		double length=Math.abs(bbox[3]-bbox[2]);
-		return width*length;
-	}
 	
-	
-	public double getArea(Node node) {
-		return getArea(getLeafNodeBoundingBox(node));
-	}
 	
 	
 	
@@ -531,7 +535,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		double smallestArea = -1;
 
 		for (Node indexNode : indexNodes) {
-			double area = getArea(indexNode);
+			double area = boundingBox.getArea(indexNode);
 			if (result == null || area < smallestArea) {
 				result = indexNode;
 				smallestArea = area;
@@ -541,36 +545,28 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		return result;
 	}
 
-	private int countChildren(Node indexNode, RelationshipType relationshipType) {
-		int counter = 0;
-		Iterator<Relationship> iterator = indexNode.getRelationships(relationshipType, Direction.OUTGOING).iterator();
-		while (iterator.hasNext()) {
-			iterator.next();
-			counter++;
-		}
-		return counter;
-	}
+	
 	
 	/**
 	 * @return is enlargement needed?
 	 */
 	private boolean insertInLeaf(Node indexNode, Node geomRootNode) {
-		return addChild(indexNode, SpatialRelationshipTypes.RTREE_REFERENCE, geomRootNode);
+		return boundingBox.addChild(indexNode, SpatialRelationshipTypes.RTREE_REFERENCE, geomRootNode);
 	}
 
 	private void splitAndAdjustPathBoundingBox(Node indexNode) {
 		// create a new node and distribute the entries
 		Node newIndexNode = quadraticSplit(indexNode);
-		Node parent = getIndexNodeParent(indexNode);
+		Node parent = boundingBox.getIndexNodeParent(indexNode);
 		if (parent == null) {
 			// if indexNode is the root
 			createNewRoot(indexNode, newIndexNode);
 		} else {
-			adjustParentBoundingBox(parent, (double[]) indexNode.getProperty(PROP_BBOX));
+			boundingBox.adjustParentBoundingBox(parent, (double[]) indexNode.getProperty(PROP_BBOX));
 			
-			addChild(parent, SpatialRelationshipTypes.RTREE_CHILD, newIndexNode);
+			boundingBox.addChild(parent, SpatialRelationshipTypes.RTREE_CHILD, newIndexNode);
 
-			if (countChildren(parent, SpatialRelationshipTypes.RTREE_CHILD) > maxNodeReferences) {
+			if (boundingBox.countChildren(parent, SpatialRelationshipTypes.RTREE_CHILD) > maxNodeReferences) {
 				splitAndAdjustPathBoundingBox(parent);
 			} else {
 				boundingBox.adjustPathBoundingBox(parent);
@@ -579,58 +575,31 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	}
 
 	private Node quadraticSplit(Node indexNode) {
-		if (nodeIsLeaf(indexNode)) return boundingBox.quadraticSplit(indexNode, SpatialRelationshipTypes.RTREE_REFERENCE);
-		else return boundingBox.quadraticSplit(indexNode, SpatialRelationshipTypes.RTREE_CHILD);
+		if (nodeIsLeaf(indexNode)) return quadraticSplit(indexNode, SpatialRelationshipTypes.RTREE_REFERENCE);
+		else return quadraticSplit(indexNode, SpatialRelationshipTypes.RTREE_CHILD);
 	}
 
 	
 
 	private void createNewRoot(Node oldRoot, Node newIndexNode) {
 		Node newRoot = database.createNode();
-		addChild(newRoot, SpatialRelationshipTypes.RTREE_CHILD, oldRoot);
-		addChild(newRoot, SpatialRelationshipTypes.RTREE_CHILD, newIndexNode);
+		boundingBox.addChild(newRoot, SpatialRelationshipTypes.RTREE_CHILD, oldRoot);
+		boundingBox.addChild(newRoot, SpatialRelationshipTypes.RTREE_CHILD, newIndexNode);
 		
 		Node layerNode = layer.getLayerNode();
 		layerNode.getSingleRelationship(SpatialRelationshipTypes.RTREE_ROOT, Direction.OUTGOING).delete();
 		layerNode.createRelationshipTo(newRoot, SpatialRelationshipTypes.RTREE_ROOT);
 	}
 
-    private double[] envelopeToBBox(double[] bounds) {
-        return new double[]{ bounds[0], bounds[2], bounds[1], bounds[3] };
-    }
+    
 
 
-	private boolean addChild(Node parent, RelationshipType type, Node newChild) {
-	    double[] childBBox = null;
-	    if(type == SpatialRelationshipTypes.RTREE_REFERENCE) {
-	        childBBox = envelopeToBBox(this.layer.getGeometryEncoder().decodeEnvelope(newChild));
-	    } else {
-	        childBBox = (double[]) newChild.getProperty(PROP_BBOX);
-	    }
-		parent.createRelationshipTo(newChild, type);
-		return adjustParentBoundingBox(parent, childBBox);
-	}
 	
 	
 	
 	
-	private Node getIndexNodeParent(Node indexNode) {
-		Relationship relationship = indexNode.getSingleRelationship(SpatialRelationshipTypes.RTREE_CHILD, Direction.INCOMING);
-		if (relationship == null) return null;
-		else return relationship.getStartNode();
-	}	
-
-
-	private Node findIndexNodeToDeleteNearestToRoot(Node indexNode) {
-		Node indexNodeParent = getIndexNodeParent(indexNode);
-		
-		if (getIndexNodeParent(indexNodeParent) != null && countChildren(indexNodeParent, SpatialRelationshipTypes.RTREE_CHILD) == minNodeReferences) {
-			// indexNodeParent is not the root and will contain less than the minimum number of entries
-			return findIndexNodeToDeleteNearestToRoot(indexNodeParent);
-		} else {
-			return indexNode;
-		}
-	}
+	
+	
 	
 	private void deleteRecursivelyEmptySubtree(Node indexNode) {
 		for (Relationship relationship : indexNode.getRelationships(SpatialRelationshipTypes.RTREE_CHILD, Direction.OUTGOING)) {
@@ -656,12 +625,12 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 		Node root = null;
 		Node child = indexNodeLeaf;
 		while (root == null) {
-			Node parent = getIndexNodeParent(child);
+			Node parent = boundingBox.getIndexNodeParent(child);
 			if (parent == null) root = child;
 			else child = parent;
 		}
 		
-		if (root.getId() != getIndexRoot().getId()) {
+		if (root.getId() != boundingBox.getIndexRoot().getId()) {
 			throw new SpatialDatabaseException("GeometryNode not indexed in this RTree: " + geomNode.getId());
 		} else {
 			return indexNodeLeaf;
@@ -681,13 +650,12 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	// Attributes
 	
 	private GraphDatabaseService database;
-	private Layer layer;
 	private int maxNodeReferences;
 	private int minNodeReferences;
 	private Node metadataNode;
 	private int totalGeometryCount;
 	private boolean countSaved = false;
-	private BoundingBox boundingBox = null;
+	private GenericBoundingBox boundingBox = null;
 
 	
 	// Private classes
@@ -709,253 +677,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 
 	
 	
-	class BoundingBox {
-		/**
-	     * Create a bounding box encompassing the two bounding boxes passed in.
-	     */	
-		private double[] createBoundingBox(double[] e, double[] e1) {
-			double[] result = e;
-			expandToInclude(result,e1);
-			return result;
-		}
-		
-		
-		/**
-	     *  Enlarges this <code>Envelope</code> so that it contains
-	     *  the given point. 
-	     *  Has no effect if the point is already on or within the envelope.
-	     *
-	     *@param  x  the value to lower the minimum x to or to raise the maximum x to
-	     *@param  y  the value to lower the minimum y to or to raise the maximum y to
-	     */
-	    public void expandToInclude(double [] curBbox,double [] otherBbox) {
-	        if (otherBbox[1]<otherBbox[0]) {
-	          return;
-	        }
-	        if (curBbox[1]<curBbox[0]) {
-	        	curBbox[0] = otherBbox[0];
-	        	curBbox[1] = otherBbox[1];
-	        	curBbox[2] = otherBbox[2];
-	        	curBbox[3] = otherBbox[3];
-	        }
-	        else {
-	          if (otherBbox[0] < curBbox[0]) {
-	        	  curBbox[0] = otherBbox[0];
-	          }
-	          if (otherBbox[1] > curBbox[1]) {
-	        	  curBbox[1] = otherBbox[1];
-	          }
-	          if (otherBbox[2] < curBbox[2]) {
-	        	  curBbox[2] = otherBbox[2];
-	          }
-	          if (otherBbox[3] > curBbox[3]) {
-	        	  curBbox[3] = otherBbox[3];
-	          }
-	        }
-	    }
-	    
-	    
-		
-		private void adjustPathBoundingBox(Node indexNode) {
-			Node parent = getIndexNodeParent(indexNode);
-			if (parent != null) {
-				if (boundingBox.adjustParentBoundingBox(parent, (double[]) indexNode.getProperty(PROP_BBOX))) {
-					// entry has been modified: adjust the path for the parent
-					adjustPathBoundingBox(parent);
-				}
-			}
-		}
-
-
-		private boolean setMin(double[] parent, double[] child, int index) {
-			if (parent[index] > child[index]) {
-				parent[index] = child[index];
-				return true;
-			} else {
-				return false;
-			}
-		}
-		
-		private boolean setMax(double[] parent, double[] child, int index) {
-			if (parent[index] < child[index]) {
-				parent[index] = child[index];
-				return true;
-			} else {
-				return false;
-			}
-		}
-		
-		/**
-		 * Fix an IndexNode bounding box after a child has been removed
-		 * @param indexNode
-		 */
-		public void adjustParentBoundingBox(Node indexNode, RelationshipType relationshipType) {
-		    //make a default null bounding box
-			//Envelope bbox = new Envelope();
-			double [] bbox= {0,0,0,0};
-			
-			Iterator<Relationship> iterator = indexNode.getRelationships(relationshipType, Direction.OUTGOING).iterator();
-			while (iterator.hasNext()) {
-				Node childNode = iterator.next().getEndNode();
-				if (bbox == null) 
-					bbox = getLeafNodeBoundingBox(childNode);
-				else
-				{
-					//bbox.expandToInclude(getLeafNodeEnvelope(childNode));
-					Double newX=(Double)childNode.getProperty("x");
-					Double newY=(Double)childNode.getProperty("y");
-					expandToInclude(bbox,getLeafNodeBoundingBox(childNode));
-				}
-			}
-			indexNode.setProperty(PROP_BBOX, new double[] { bbox[0], bbox[2], bbox[1], bbox[3] });
-		}
-		
-		
-		private Node quadraticSplit(Node indexNode, RelationshipType relationshipType) {
-	 		List<Node> entries = new ArrayList<Node>();
-			
-			Iterable<Relationship> relationships = indexNode.getRelationships(relationshipType, Direction.OUTGOING);
-			for (Relationship relationship : relationships) {
-				entries.add(relationship.getEndNode());
-				relationship.delete();
-			}
-
-			// pick two seed entries such that the dead space is maximal
-			Node seed1 = null;
-			Node seed2 = null;
-			double worst = Double.NEGATIVE_INFINITY;
-			for (Node e : entries) {
-				double[] eEnvelope = getLeafNodeBoundingBox(e);
-				for (Node e1 : entries) {
-					double[] e1Envelope = getLeafNodeBoundingBox(e1);
-					double deadSpace = getArea(createBoundingBox(eEnvelope, e1Envelope)) - getArea(eEnvelope) - getArea(e1Envelope);
-					if (deadSpace > worst) {
-						worst = deadSpace;
-						seed1 = e;
-						seed2 = e1;
-					}
-				}
-			}
-			
-			List<Node> group1 = new ArrayList<Node>();
-			group1.add(seed1);
-			double[] group1envelope = getLeafNodeBoundingBox(seed1);
-			
-			List<Node> group2 = new ArrayList<Node>();
-			group2.add(seed2);
-			double[] group2envelope = getLeafNodeBoundingBox(seed2);
-			
-			entries.remove(seed1);
-			entries.remove(seed2);
-			while (entries.size() > 0) {
-				// compute the cost of inserting each entry
-				List<Node> bestGroup = null;
-				double[] bestGroupEnvelope = null;
-				Node bestEntry = null;
-				double expansionMin = Double.POSITIVE_INFINITY;
-				for (Node e : entries) {
-					double[] nodeEnvelope = getLeafNodeBoundingBox(e);
-					double expansion1 = getArea(createBoundingBox(nodeEnvelope, group1envelope)) - getArea(group1envelope);
-					double expansion2 = getArea(createBoundingBox(nodeEnvelope, group2envelope)) - getArea(group2envelope);
-							
-					if (expansion1 < expansion2 && expansion1 < expansionMin) {
-						bestGroup = group1;
-						bestGroupEnvelope = group1envelope;
-						bestEntry = e;
-						expansionMin = expansion1;
-					} else if (expansion2 < expansion1 && expansion2 < expansionMin) {
-						bestGroup = group2;
-						bestGroupEnvelope = group2envelope;					
-						bestEntry = e;
-						expansionMin = expansion2;					
-					} else if (expansion1 == expansion2 && expansion1 < expansionMin) {
-						// in case of equality choose the group with the smallest area
-						if (getArea(group1envelope) < getArea(group2envelope)) {
-							bestGroup = group1;
-							bestGroupEnvelope = group1envelope; 
-						} else {
-							bestGroup = group2;
-							bestGroupEnvelope = group2envelope; 
-						}
-						bestEntry = e;
-						expansionMin = expansion1;					
-					}
-				}
-				
-				// insert the best candidate entry in the best group
-				bestGroup.add(bestEntry);
-				expandToInclude(bestGroupEnvelope,getLeafNodeBoundingBox(bestEntry));
-
-				entries.remove(bestEntry);
-				
-				// each group must contain at least minNodeReferences entries.
-				// if the group size added to the number of remaining entries is equal to minNodeReferences
-				// just add them to the group
-				
-				if (group1.size() + entries.size() == minNodeReferences) {
-					group1.addAll(entries);
-					entries.clear();
-				}
-				
-				if (group2.size() + entries.size() == minNodeReferences) {
-					group2.addAll(entries);
-					entries.clear();
-				}
-			}
-			
-			// reset bounding box and add new children
-			indexNode.removeProperty(PROP_BBOX);
-			for (Node node : group1) {
-				addChild(indexNode, relationshipType, node);
-			}
-
-			// create new node from split
-			Node newIndexNode = database.createNode();
-			for (Node node: group2) {
-				addChild(newIndexNode, relationshipType, node);
-			}
-			
-			return newIndexNode;
-		}
-		
-		/**
-		   *  Returns <code>true</code> if this <code>bounding box</code> is a "null"
-		   *  ebounding box
-		   *
-		   *@return    <code>true</code> if this <code>bounding box</code> is uninitialized
-		   *      or is the envelope of the empty geometry.
-		   */
-		  public boolean isNull(double[] curBox) {
-		    return curBox[1] < curBox[0];
-		  }
-		
-		/**
-		 * Adjust IndexNode bounding box according to the new child inserted
-		 * @param parent IndexNode
-		 * @param child geomNode inserted
-		 * @return is bbox changed?
-		 */
-		private boolean adjustParentBoundingBox(Node parent, double[] childBBox) {
-			if (!parent.hasProperty(PROP_BBOX)) {
-				parent.setProperty(PROP_BBOX, new double[] { childBBox[0], childBBox[1], childBBox[2], childBBox[3] });
-				return true;
-			}
-			
-			double[] parentBBox = (double[]) parent.getProperty(PROP_BBOX);
-			
-			boolean valueChanged = setMin(parentBBox, childBBox, 0);
-			valueChanged = setMin(parentBBox, childBBox, 1) || valueChanged;
-			valueChanged = setMax(parentBBox, childBBox, 2) || valueChanged;
-			valueChanged = setMax(parentBBox, childBBox, 3) || valueChanged;
-			
-			if (valueChanged) {
-				parent.setProperty(PROP_BBOX, parentBBox);
-			}
-			
-			return valueChanged;
-		}
-		
-	}
+	
 	
 	
 	class WarmUpVisitor implements SpatialIndexVisitor {
@@ -1013,7 +735,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	}
 
 	public Iterable<Node> getAllIndexNodes() {
-		return getIndexRoot().traverse(Order.BREADTH_FIRST, StopEvaluator.END_OF_GRAPH, ReturnableEvaluator.ALL_BUT_START_NODE,
+		return boundingBox.getIndexRoot().traverse(Order.BREADTH_FIRST, StopEvaluator.END_OF_GRAPH, ReturnableEvaluator.ALL_BUT_START_NODE,
 		        SpatialRelationshipTypes.RTREE_CHILD, Direction.OUTGOING);
 	}
 
@@ -1039,7 +761,7 @@ public class RTreeIndex implements SpatialTreeIndex, SpatialIndexWriter, Constan
 	}
 
 	public void debugIndexTree() {
-		printTree(getIndexRoot(), 0);
+		printTree(boundingBox.getIndexRoot(), 0);
 	}
 
 	private void printTree(Node root, int depth) {
